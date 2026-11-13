@@ -1,0 +1,41 @@
+CURRENT BEHAVIOR
+POST /v1/statements with only cpp_id ("DDM:B1FW") returns every account that has statement files in S3 for that cpp_id. Today that's 3 accounts, including test data such as "TEST ACCOUNT ONE".
+
+NEW REQUIREMENT
+The accounts returned must come from the existing customer-accounts logic, not only from what's in S3:
+1. The client calls only POST /v1/statements, with cpp_id and an optional customer_account_number.
+2. Inside the statements API, call the existing customer-accounts logic (the code behind POST /v1/customer-accounts) directly as a function, not over HTTP, with the cpp_id. Read every page: it takes cpp_id as a list and uses pagination {limit, offset}.
+3. From the customer_accounts it returns, build a unique set of customer_account_nbr values: trim, drop null or blank, remove duplicates.
+4. If the request has customer_account_number, narrow the set to that number.
+5. Pass the set to the existing statements logic as a filter, so it returns only accounts whose number is in the set.
+6. Return the existing response format, with totals for the accounts returned and the existing masking. If nothing matches, return 200 with zero totals and accounts []. If the customer-accounts call fails, return an error, never 200 with an empty list.
+
+STEP 1: ANALYZE AND REPORT BEFORE CHANGING ANY CODE
+- Which customer-accounts function to call, and how statements can call it with cpp_id and pagination.
+- How the statements logic finds accounts today, and where the filter should go. Match on the real account number before masking. If the S3 path uses a hash of the account number (like 4f73f38cc4e7 in statement_id), consider hashing each customer_account_nbr and reading only the matching S3 folders, so other accounts' files are never read.
+- Whether customer_account_nbr and the account numbers in the S3 data use the same format. customer-accounts returns values like "1000001" (7 digits), while statements requests use "0120007908" (10 digits with a leading zero). Check leading zeros, length and whitespace, and propose how to normalize them.
+- Performance: POST /v1/customer-accounts with limit 100 took 23.92 s in Postman, and API Gateway times out at 29 s. Find where that time goes, estimate the total time for statements, and propose how to stay under the limit, for example fetching only customer_account_nbr instead of the full customer-accounts payload.
+- Whether eas-api-common needs changes. Ask me first if it does, because that needs a JFrog release and a new layer version.
+- Your recommendations for the open questions below, and an implementation plan. Then wait for my approval.
+
+OPEN QUESTIONS (recommend, don't decide)
+- An account from customer-accounts that has no statements: include it with statements: [], or leave it out?
+- A customer_account_number in the request that isn't in the customer-accounts list: return an empty result, or an error?
+- Use every account customer-accounts returns, or only some (for example only open accounts, or only those whose source_client_program_participant_id equals the cpp_id)?
+
+STEP 2: IMPLEMENT AFTER I APPROVE
+- Keep customer_account_number optional in the request model and the OpenAPI docs.
+- Add to the existing trace logs: customer-accounts call time in ms, accounts returned, unique account numbers, accounts matched in S3, and total time in ms.
+
+STEP 3: TESTS
+- No account number: only accounts found in both customer-accounts and S3 are returned, and accounts found only in S3 are left out.
+- Account number given and in the list; account number given but not in the list.
+- Duplicate, blank and differently formatted account numbers from customer-accounts.
+- Customer-accounts results that span several pages.
+- Customer-accounts returns nothing; the customer-accounts call fails.
+- The caller can't access the cpp_id.
+- Run the full suite and show me the results and the diff.
+
+RULES
+- Don't change the /v1/customer-accounts endpoint or the statements response format.
+- Don't commit, push, deploy or change anything in AWS.
