@@ -1,38 +1,54 @@
-CURRENT BEHAVIOR
-POST /v1/statements with only cpp_id ("DDM:B1FW") returns every account that has statement files in S3 for that cpp_id. Today that's 3 accounts, including test data such as "TEST ACCOUNT ONE".
+Repo: C:\Work\edas-api-service (FastAPI on AWS Lambda behind API Gateway). The statements and customeraccounts features are both in this app.
 
-NEW REQUIREMENT
-The accounts returned must come from the existing customer-accounts logic, not only from what's in S3:
-1. The client calls only POST /v1/statements, with cpp_id and an optional customer_account_number.
-2. Inside the statements API, call the existing customer-accounts logic (the code behind POST /v1/customer-accounts) directly as a function, not over HTTP, with the cpp_id. Read every page: it takes cpp_id as a list and uses pagination {limit, offset}.
-3. From the customer_accounts it returns, build a unique set of customer_account_nbr values: trim, drop null or blank, remove duplicates.
-4. If the request has customer_account_number, narrow the set to that number.
-5. Pass the set to the existing statements logic as a filter, so it returns only accounts whose number is in the set.
-6. Return the existing response format, with totals for the accounts returned and the existing masking. If nothing matches, return 200 with zero totals and accounts []. If the customer-accounts call fails, return an error, never 200 with an empty list.
+GOAL
+POST /v1/statements takes cpp_id and an optional customer_account_number. It must return only accounts that are valid in Snowflake AND have a statement folder in S3. Typical sizes: Snowflake returns about 7,000 account numbers for a cpp_id, while S3 has only 4 account folders. Build the response with the least work.
+
+ACCOUNT NUMBER QUERY
+Add a new function next to the existing customer-accounts Snowflake code, reusing its connection and config. Don't change the /v1/customer-accounts endpoint. Pass cpp_id as a bind parameter. Never build the SQL with string formatting.
+
+SELECT DISTINCT a.CUSTOMER_ACCOUNT_NBR
+FROM DB_MART_MAIN.SCH_MART_MAIN.VW_CUSTOMER_ACCOUNT a
+WHERE a.REC_EFF_END_DATE_TIME >= '9999-12-31'
+  AND a.INTERNAL_ACCOUNT_CLASSIFICATION_TYPE_ID IN (1, 2)
+  AND a.SOURCE_CLIENT_PROGRAM_PARTICIPANT_ID IN (<cpp_id bind>)
+
+FLOW WHEN NO ACCOUNT NUMBER IS GIVEN
+1. Validate the request and check the caller can access the cpp_id (existing checks).
+2. Run these two at the same time:
+   a. The Snowflake query above. Load the results into a Python set of normalized account numbers. No pagination.
+   b. One S3 listing of the cpp_id's prefix with Delimiter="/", using a paginator, to get only the account folder names.
+3. Match in memory: loop over the S3 folders (the small side) and check each one against the set (the big side). Never make an S3 call per Snowflake account. If folder names are hashes of the account number (like 4f73f38cc4e7 in statement_id), hash each Snowflake number once into a dict {hash: account_number} and look up the folder names in it.
+4. Read statement files only for the matched folders, in parallel with a small thread pool, using the existing statement parsing logic.
+5. Return only accounts found in both sources, in the existing response format, with totals for the accounts returned and the existing masking. Snowflake accounts without an S3 folder are not returned. If nothing matches, return 200 with zero totals and accounts []. If Snowflake or S3 fails, return an error, never 200 with an empty list.
+
+FLOW WHEN AN ACCOUNT NUMBER IS GIVEN
+Run the same query with one more bind: AND a.CUSTOMER_ACCOUNT_NBR = <account bind>. If it returns a row, run the existing single-account statement lookup. Don't load the full account list.
+
+PERFORMANCE
+- Create the Snowflake connection once per Lambda container and reuse it across requests, if the code doesn't already.
+- The full /v1/customer-accounts query took 23.92 s, and API Gateway times out at 29 s. Log each step's time and tell me the expected total.
+- Recommend whether to cache the account number set per cpp_id in memory for a few minutes. Don't add a cache until I confirm.
 
 STEP 1: ANALYZE AND REPORT BEFORE CHANGING ANY CODE
-- Which customer-accounts function to call, and how statements can call it with cpp_id and pagination.
-- How the statements logic finds accounts today, and where the filter should go. Match on the real account number before masking. If the S3 path uses a hash of the account number (like 4f73f38cc4e7 in statement_id), consider hashing each customer_account_nbr and reading only the matching S3 folders, so other accounts' files are never read.
-- Whether customer_account_nbr and the account numbers in the S3 data use the same format. customer-accounts returns values like "1000001" (7 digits), while statements requests use "0120007908" (10 digits with a leading zero). Check leading zeros, length and whitespace, and propose how to normalize them.
-- Performance: POST /v1/customer-accounts with limit 100 took 23.92 s in Postman, and API Gateway times out at 29 s. Find where that time goes, estimate the total time for statements, and propose how to stay under the limit, for example fetching only customer_account_nbr instead of the full customer-accounts payload.
+- Where the customer-accounts Snowflake code lives and where the new function fits.
+- How the S3 prefix and account folders are named, and how folder names map to account numbers (plain number or hash, and how the hash is calculated).
+- Whether CUSTOMER_ACCOUNT_NBR and the account numbers in S3 use the same format (leading zeros, length, whitespace). Customer-accounts returned values like "1000001", while statements requests use "0120007908". Propose one normalize function to use on both sides.
 - Whether eas-api-common needs changes. Ask me first if it does, because that needs a JFrog release and a new layer version.
-- Your recommendations for the open questions below, and an implementation plan. Then wait for my approval.
+- An implementation plan. Then wait for my approval.
 
-OPEN QUESTIONS (recommend, don't decide)
-- An account from customer-accounts that has no statements: include it with statements: [], or leave it out?
-- A customer_account_number in the request that isn't in the customer-accounts list: return an empty result, or an error?
-- Use every account customer-accounts returns, or only some (for example only open accounts, or only those whose source_client_program_participant_id equals the cpp_id)?
+OPEN QUESTION (recommend, don't decide)
+- customer_account_number is given but Snowflake doesn't return it: 200 with an empty list, or an error?
 
 STEP 2: IMPLEMENT AFTER I APPROVE
 - Keep customer_account_number optional in the request model and the OpenAPI docs.
-- Add to the existing trace logs: customer-accounts call time in ms, accounts returned, unique account numbers, accounts matched in S3, and total time in ms.
+- Add to the existing trace logs: Snowflake ms and row count, S3 list ms and folder count, matched count, statement read ms, total ms.
 
 STEP 3: TESTS
-- No account number: only accounts found in both customer-accounts and S3 are returned, and accounts found only in S3 are left out.
-- Account number given and in the list; account number given but not in the list.
-- Duplicate, blank and differently formatted account numbers from customer-accounts.
-- Customer-accounts results that span several pages.
-- Customer-accounts returns nothing; the customer-accounts call fails.
+- 7,000 Snowflake numbers and 4 S3 folders: only the matches are returned, and no S3 call is made per Snowflake account.
+- An S3 folder that isn't in Snowflake is left out, and a Snowflake account with no S3 folder is left out.
+- Different number formats (leading zeros, spaces) still match.
+- Account number given and found; account number given and not found.
+- Snowflake returns nothing; Snowflake fails; S3 fails.
 - The caller can't access the cpp_id.
 - Run the full suite and show me the results and the diff.
 
