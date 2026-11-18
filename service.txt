@@ -1,57 +1,43 @@
-Repo: C:\Work\edas-api-service (FastAPI on AWS Lambda behind API Gateway). The statements and customeraccounts features are both in this app.
+Repo: C:\Work\edas-api-service. Reference implementation: portal-api (announcements), which works from OutSystems with a human Okta token.
 
 GOAL
-POST /v1/statements takes cpp_id and an optional customer_account_number. It must return only accounts that are valid in Snowflake AND have a statement folder in S3. Typical sizes: Snowflake returns about 7,000 account numbers for a cpp_id, while S3 has only 4 account folders. Build the response with the least work.
+Make POST /v1/statements and GET /v1/statements/{id} authorize human callers the same way portal-api's announcements do, so OutSystems can call them. Today both return 403 for human tokens, because auth_service.can_access_resource (statements_router.py lines 171 and 386) requires the statements.read scope and a cpp_id claim, which human tokens don't have.
 
-ACCOUNT NUMBER QUERY
-Add a new function next to the existing customer-accounts Snowflake code, reusing its connection and config. Don't change the /v1/customer-accounts endpoint. Pass cpp_id as a bind parameter. Never build the SQL with string formatting.
-
-SELECT DISTINCT a.CUSTOMER_ACCOUNT_NBR
-FROM DB_MART_MAIN.SCH_MART_MAIN.VW_CUSTOMER_ACCOUNT a
-WHERE a.REC_EFF_END_DATE_TIME >= '9999-12-31'
-  AND a.INTERNAL_ACCOUNT_CLASSIFICATION_TYPE_ID IN (1, 2)
-  AND a.SOURCE_CLIENT_PROGRAM_PARTICIPANT_ID IN (<cpp_id bind>)
-
-FLOW WHEN NO ACCOUNT NUMBER IS GIVEN
-1. Validate the request and check the caller can access the cpp_id (existing checks).
-2. Run these two at the same time:
-   a. The Snowflake query above. Load the results into a Python set of normalized account numbers. No pagination.
-   b. One S3 listing of the cpp_id's prefix with Delimiter="/", using a paginator, to get only the account folder names.
-3. Match in memory: loop over the S3 folders (the small side) and check each one against the set (the big side). Never make an S3 call per Snowflake account. If folder names are hashes of the account number (like 4f73f38cc4e7 in statement_id), hash each Snowflake number once into a dict {hash: account_number} and look up the folder names in it.
-4. Read statement files only for the matched folders, in parallel with a small thread pool, using the existing statement parsing logic.
-5. Return only accounts found in both sources, in the existing response format, with totals for the accounts returned and the existing masking. Snowflake accounts without an S3 folder are not returned. If nothing matches, return 200 with zero totals and accounts []. If Snowflake or S3 fails, return an error, never 200 with an empty list.
-
-FLOW WHEN AN ACCOUNT NUMBER IS GIVEN
-Run the same query with one more bind: AND a.CUSTOMER_ACCOUNT_NBR = <account bind>. If it returns a row, run the existing single-account statement lookup. Don't load the full account list.
-
-PERFORMANCE
-- Create the Snowflake connection once per Lambda container and reuse it across requests, if the code doesn't already.
-- The full /v1/customer-accounts query took 23.92 s, and API Gateway times out at 29 s. Log each step's time and tell me the expected total.
-- Recommend whether to cache the account number set per cpp_id in memory for a few minutes. Don't add a cache until I confirm.
+DECISIONS (already made, follow them)
+1. Caller identity: port portal-api's get_user_context logic (user_context.py) into this repo. The email comes from sub, falling back to the email claim, plus the Internal flag. Keep today's JWT signature validation.
+2. Human or machine: if the token has a valid email address, use the new database entitlement check. If not (machine tokens, where sub is usually a client ID), keep the existing statements.read scope and cpp_id claim check exactly as it is.
+3. Entitlements for human callers, queried through RDSProxyService like the other services (DATABASE_PROXY_ENDPOINT, DATABASE_DB_NAME and DATABASE_DB_USER are already set on the Lambda):
+   - Look up the user by email in mrd.user_profile. No active profile means 403.
+   - Internal users can access all CPPs.
+   - External users can access only the CPPs in their active assignments in mrd.user_external_cpp_role_assignment joined to mrd.client_program_participant, using the same joins as portal-api's GET_USER_SEARCH_QUERY.
+   - For now, an active assignment for the CPP is enough. Add a setting STATEMENTS_REQUIRED_FUNCTION_CD, empty by default. When it's set, also require that rnt_function_cd in mrd.user_entitlement with access level R or W, checked the same way portal-api checks its function codes.
+4. Email domain check: apply portal-api's EmailValidator the same way it does.
+5. Location: build it in this repo, not in eas-api-common, as separate modules (for example auth/user_context.py and auth/entitlements.py) so it can move to eas-api-common later.
+6. GET /v1/statements/{id}: check access against the CPP in the statement itself, which is the prefix of statement_id (DDM:B1FW in DDM:B1FW_4f73f38cc4e7_20251231_DDM_Monthly). Never check against a value the caller sends. Use the existing statement_id parsing code.
+7. Status codes and error bodies: match portal-api.
 
 STEP 1: ANALYZE AND REPORT BEFORE CHANGING ANY CODE
-- Where the customer-accounts Snowflake code lives and where the new function fits.
-- How the S3 prefix and account folders are named, and how folder names map to account numbers (plain number or hash, and how the hash is calculated).
-- Whether CUSTOMER_ACCOUNT_NBR and the account numbers in S3 use the same format (leading zeros, length, whitespace). Customer-accounts returned values like "1000001", while statements requests use "0120007908". Propose one normalize function to use on both sides.
-- Whether eas-api-common needs changes. Ask me first if it does, because that needs a JFrog release and a new layer version.
-- An implementation plan. Then wait for my approval.
-
-OPEN QUESTION (recommend, don't decide)
-- customer_account_number is given but Snowflake doesn't return it: 200 with an empty list, or an error?
+- Show portal-api's get_user_context, EmailValidator, entitlement queries, and how its routes use them, with file and line numbers, and say what you will port.
+- Show both can_access_resource calls in statements_router.py and how the new check replaces them.
+- Explain how RDSProxyService connects (IAM auth token or a stored secret) and what this Lambda needs for that: IAM permissions (such as rds-db:connect, or secretsmanager:GetSecretValue and kms:Decrypt), plus VPC subnets and security groups to reach the proxy. Compare with portal-api's Lambda and list anything this Lambda is missing, so I can ask infra to add it.
+- Estimate the extra time per request from the entitlement query, and say whether we need a short in-memory cache per email. Statements is already close to API Gateway's 29-second limit.
+- Give me your implementation plan, then wait for my approval.
 
 STEP 2: IMPLEMENT AFTER I APPROVE
-- Keep customer_account_number optional in the request model and the OpenAPI docs.
-- Add to the existing trace logs: Snowflake ms and row count, S3 list ms and folder count, matched count, statement read ms, total ms.
+- Use bound parameters in every query. Never build SQL from token or request values.
+- Add to the existing trace logs: auth path (human or machine), user type (internal or external), entitlement result, and query time. Mask the email (for example j***@domain.com) and never log tokens.
+- If the database lookup fails, return an error. Never grant access and never return 200 with empty data.
 
 STEP 3: TESTS
-- 7,000 Snowflake numbers and 4 S3 folders: only the matches are returned, and no S3 call is made per Snowflake account.
-- An S3 folder that isn't in Snowflake is left out, and a Snowflake account with no S3 folder is left out.
-- Different number formats (leading zeros, spaces) still match.
-- Account number given and found; account number given and not found.
-- Snowflake returns nothing; Snowflake fails; S3 fails.
-- The caller can't access the cpp_id.
-- Run the full suite and show me the results and the diff.
+- Internal human user: any cpp_id is allowed.
+- External human user: allowed for an assigned CPP, 403 for an unassigned CPP.
+- Email with a restricted domain; email with no profile.
+- With STATEMENTS_REQUIRED_FUNCTION_CD set: allowed when the user has the function at R or W, 403 without it.
+- Machine token with statements.read and a cpp_id claim: behaves exactly as today. Machine token without the scope: 403.
+- GET /v1/statements/{id} for a statement from a CPP the user can't access: 403.
+- Database failure: an error response.
+- Run the full test suite and show me the results and the diff.
 
 RULES
-- Don't change the /v1/customer-accounts endpoint or the statements response format.
+- Don't change portal-api, the statements response format, or the machine-token behavior.
 - Don't commit, push, deploy or change anything in AWS.
