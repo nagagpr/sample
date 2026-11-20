@@ -1,45 +1,10 @@
-HK-API-376 has new changes. Merge the latest origin/feature/HK-API-376 into feature/SA-API-412, then check that all the statements changes still work, and fix anything that is missing or broken.
+Decisions:
+1. Institution status: add HK-API-376's ACTIVE institution condition to the account-numbers query, so the all-accounts list matches /v1/customer-accounts. Leave the existing single-account path unchanged. Add a test for an inactive institution.
+2. Error code: keep 422 to match the existing response format.
 
-STEP 1: SAFE STARTING POINT
-- If the earlier HK-API-376 merge is still in progress (MERGE_HEAD exists), run the full test suite. If the tests pass, commit that merge locally as a checkpoint with the message "Merge origin/feature/HK-API-376 into feature/SA-API-412". If any test fails, stop and tell me.
-- Create a backup branch at the current HEAD: git branch backup/SA-API-412-before-HK-376-update HEAD
-- Leave WORKFLOW_FINDINGS.md and the disclosures_management_* files untracked and untouched.
-
-STEP 2: GET THE LATEST
-- Run git fetch origin.
-- List the new commits and changed files on origin/feature/HK-API-376 that my branch doesn't have yet (git log and git diff --stat HEAD...origin/feature/HK-API-376). If there's nothing new, tell me and stop.
-- If origin/feature/SA-API-412 has commits that my local branch doesn't have, merge those first.
-- Run: git merge origin/feature/HK-API-376
-
-STEP 3: RESOLVE AND RE-CHECK THE STATEMENTS CHANGES
-Make the decisions yourself, using these rules that I've already approved:
-- Keep every HK-API-376 change. Where my code depends on something it changed, renamed or removed, adapt my code to its new design. Don't bring old code back.
-- Statements access stays authorized by the Statements function check, with no Customer Account guard.
-- The all-accounts path (no customer_account_number) must return the same accounts as /v1/customer-accounts: scoped to the cpp_id, ACTIVE institution only. If HK-API-376 changed the customer-accounts query or its entitlement logic again, update the account-numbers query to match.
-- Use bind parameters, or strict full-match validation before inlining any value. No private _engine or _build_engine access.
-- The single-account path, GET /v1/statements/{statement_id}, the 422 error format, the response format and the trace logs stay unchanged.
-Stop and ask me only if a new HK-API-376 change would break one of these rules.
-
-STEP 4: VERIFY
-- Check that no conflict markers are left: run git diff --check and search for <<<<<<< and >>>>>>>.
-- Search src and tests for references to anything HK-API-376 removed or renamed.
-- If requirements.in or requirements.txt changed, reinstall from JFrog with pip install -r requirements.txt, then confirm eas-api-common is not an editable or local install.
-- Run python -m compileall and import the Lambda handler module.
-- Run the full test suite and show the pass and fail counts.
-
-STEP 5: STAGE, BUT DON'T COMMIT
-- Stage the resolved files and your changes by name, so nothing is left under Merge Changes. Don't use git add . or git add -A.
-- Show git status. It should list no unmerged files, the merge as staged, and only the untracked files above under Changes.
+Then clean up the merge state:
+- Run the full test suite again and show the pass and fail counts.
+- Stage the resolved customer_account_service.py so it leaves Merge Changes. Also stage your other changes by name: customer_account_queries.py, test_account_numbers.py, test_statements_router.py, and any file you change for decision 1.
+- Don't stage WORKFLOW_FINDINGS.md or the disclosures_management_* files. Leave them untracked.
+- Show git status. It should list no unmerged files, everything for the merge as staged, and only those untracked files under Changes.
 - Don't commit or push.
-
-REPORT, IN PLAIN LANGUAGE
-- What came in from HK-API-376.
-- Any conflicts, and how you resolved them.
-- What statements code you had to update, and why.
-- The test results.
-- What I should check when I review.
-
-RULES
-- Don't push, rebase, force, run reset --hard, or delete backup branches.
-- Don't run AWS commands.
-- Don't modify eas-api-common.
