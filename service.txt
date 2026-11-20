@@ -1,1 +1,7 @@
-a
+I approve with these decisions. Then do Step 3 and Step 4, and stop before committing.
+
+1. Entitlement: agreed, no Customer Account guard in the account-numbers query, because the Statements function check already authorizes the caller. One condition: if HK-API-376's guard also limits which accounts a user can see (row level, not just whether they have the function), apply that same account restriction in the statements query, checked against the Statements function instead of Customer Account. Statements must never show an account the user couldn't see in /v1/customer-accounts. Tell me which case it was.
+2. Query: if the public snowflake.execute_query accepts bind parameters, use it with binds. If it doesn't, follow HK-API-376's pattern, but before building the SQL, fully match every inlined value (cpp_id and customer_account_number) against a strict pattern. Add a test showing that a value containing a quote or semicolon is rejected with 400 before any query runs. Either way, remove the private _engine and _build_engine access.
+3. Staging: leave the index as git set it. Don't stage or commit any file you change, so your edits show as unstaged changes I can review separately from the automatic merge.
+
+When you finish, give me a short plain-language summary: what you changed and why, the test results, and what I should check when I review.
