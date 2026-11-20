@@ -1,10 +1,41 @@
-Decisions:
-1. Institution status: add HK-API-376's ACTIVE institution condition to the account-numbers query, so the all-accounts list matches /v1/customer-accounts. Leave the existing single-account path unchanged. Add a test for an inactive institution.
-2. Error code: keep 422 to match the existing response format.
+Finish everything that's left on feature/SA-API-412. Make the decisions yourself using the rules below, and only stop if one of the rules can't be met.
 
-Then clean up the merge state:
-- Run the full test suite again and show the pass and fail counts.
-- Stage the resolved customer_account_service.py so it leaves Merge Changes. Also stage your other changes by name: customer_account_queries.py, test_account_numbers.py, test_statements_router.py, and any file you change for decision 1.
-- Don't stage WORKFLOW_FINDINGS.md or the disclosures_management_* files. Leave them untracked.
-- Show git status. It should list no unmerged files, everything for the merge as staged, and only those untracked files under Changes.
-- Don't commit or push.
+STEP 1: CONFIRM THE SNOWFLAKE COLUMN
+You used PARTICIPATING_INSTITUTION_STATUS for the ACTIVE institution condition without confirming it exists.
+- If you can run a read-only query against dev Snowflake with the project's existing configuration, run:
+  SELECT TABLE_SCHEMA, TABLE_NAME FROM DB_MART_MAIN.INFORMATION_SCHEMA.COLUMNS WHERE COLUMN_NAME = 'PARTICIPATING_INSTITUTION_STATUS';
+  Keep the condition only if the column exists on the table the account-numbers query uses.
+- If you can't run the query, use the same institution-status source that HK-API-376's code already uses (for example the ACTIVE filter in entitlement_cte.py), so the column is known to exist.
+- If neither works, remove the ACTIVE institution condition and its test. A query that fails in AWS is worse than leaving the condition out.
+
+STEP 2: COMMIT THE CURRENT MERGE
+Run the full test suite. If every test passes, stage the changes from step 1 by name and commit the in-progress merge with the message "Merge origin/feature/HK-API-376 into feature/SA-API-412". If any test fails, fix it first. Then create a backup branch: git branch backup/SA-API-412-before-HK-376-update HEAD
+
+STEP 3: MERGE THE LATEST HK-API-376
+- Run git fetch origin. If origin/feature/SA-API-412 has commits my local branch doesn't have, merge those first.
+- List the new commits and files on origin/feature/HK-API-376 that my branch doesn't have yet. If there are none, skip to the report.
+- Run: git merge origin/feature/HK-API-376
+- Resolve any conflicts using these rules:
+  - Keep every HK-API-376 change. Where my code depends on something it changed, renamed or removed, adapt my code. Don't bring old code back.
+  - Statements access stays authorized by the Statements function check, with no Customer Account guard.
+  - The all-accounts path (no customer_account_number) returns the same accounts as /v1/customer-accounts for that cpp_id. If HK-API-376 changed that query or its entitlement logic, update the account-numbers query to match.
+  - Validate every value with a strict full-match pattern before it goes into SQL, as HK-API-376 does. No private _engine or _build_engine access.
+  - The single-account path, GET /v1/statements/{statement_id}, the 422 error format, the response format and the trace logs stay unchanged.
+
+STEP 4: VERIFY AND COMMIT
+- Check that no conflict markers are left (git diff --check), and search src and tests for references to anything removed or renamed.
+- If requirements.in or requirements.txt changed, reinstall from JFrog with pip install -r requirements.txt, then confirm eas-api-common is not an editable or local install.
+- Run python -m compileall, import the Lambda handler module, and run the full test suite.
+- If every test passes, stage the files by name and commit the merge with the message "Merge latest origin/feature/HK-API-376 into feature/SA-API-412".
+
+ALWAYS
+- Never stage, change or delete WORKFLOW_FINDINGS.md or the disclosures_management_* files. Don't use git add . or git add -A.
+- Don't push, rebase, force, run reset --hard, or delete backup branches.
+- Don't run AWS commands, and don't modify eas-api-common.
+
+REPORT, IN PLAIN LANGUAGE
+- What you found about the Snowflake column, and what you decided.
+- What came in from HK-API-376, and how you resolved any conflicts.
+- What statements code you changed, and why.
+- The test results, and the final git status.
+- Anything I should tell the business owner.
