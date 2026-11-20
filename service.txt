@@ -1,1 +1,51 @@
-a
+Repo: C:\Work\edas-api-service. Branch: feature/SA-API-412.
+A merge of origin/feature/HK-API-376 is in progress and uncommitted, with one conflict in customer_account_service.py. Don't resolve it the way you proposed yet. Follow these steps instead.
+
+GOAL
+Finish merging the latest changes into my branch so that:
+- every change from HK-API-376 is kept, including the deleted cpp_lookup_service.py and reference_data_service.py, the new request_parsing.py and the entitlement_cte.py changes; and
+- every statements change from my branch still works. Where my code depends on something HK-API-376 removed, adapt it to HK-API-376's new design instead of bringing the old code back.
+
+STEP 1: SAFETY AND INVENTORY (read-only, except creating the backup branch)
+1. Record the current branch, HEAD and MERGE_HEAD. Create a backup branch: git branch backup/SA-API-412-pre-HK-376-merge HEAD
+2. Run git fetch origin. Tell me whether origin/feature/SA-API-412 has commits my local branch doesn't have, and whether origin/feature/HK-API-376 has commits newer than MERGE_HEAD. If either is true, stop and tell me. Don't abort or redo the merge without my OK.
+3. Find the merge base. List my branch's commits and changed files since then (git log and git diff --stat merge-base..HEAD), and the same for HK-API-376 (merge-base..MERGE_HEAD).
+4. From my commits, list every statements-related change, including customer-account code I added for statements. For example: list_account_numbers, build_account_numbers_query, _resolve_cpp_ids, build_count_query, the optional customer_account_number path, the trace logs, and any auth changes in statements_router.py.
+5. Explain how HK-API-376 now resolves cpp_id and entitlements: what replaced cpp_lookup_service and reference_data_service, and what request_parsing.py and entitlement_cte.py do now.
+
+STEP 2: PLAN, THEN WAIT FOR MY APPROVAL
+For each conflict hunk and each of my statements changes, say keep, adapt or drop, and why. Answer these questions specifically:
+- Does list_account_numbers call _resolve_cpp_ids or _get_cpp_lookup? If so, how will it resolve cpp_id after the merge? It must use the same approach HK-API-376's customer-accounts code uses now.
+- Is build_count_query still defined in the merged customer_account_queries.py? What still calls it?
+- Does build_account_numbers_query use the same filters and entitlement logic as HK-API-376's customer-accounts query (active records, classification types 1 and 2, the cpp filter, the entitlement CTE)? The statements "all accounts" path must return the same accounts that /v1/customer-accounts returns for the same caller.
+- Do statements_service.py, statements_router.py or their tests import or mock anything that HK-API-376 deleted, renamed or moved (for example into request_parsing.py)?
+- Did requirements.in or requirements.txt change in the merge, for example the eas-api-common version?
+
+STEP 3: RESOLVE AND ADAPT (only after I approve)
+- Resolve the conflict and make the adaptations in the approved plan.
+- Stage files one at a time by name. Don't use git add . or git add -A.
+- Leave the untracked files alone and keep them out of the commit: WORKFLOW_FINDINGS.md and the disclosures_management_* files.
+- Don't recreate deleted files, and don't change HK-API-376's behavior beyond what the plan lists.
+
+STEP 4: VERIFY
+- Check that no conflict markers are left: run git diff --check and search for <<<<<<< and >>>>>>>.
+- Search src and tests for references to anything removed: cpp_lookup_service, reference_data_service, _get_cpp_lookup, _resolve_cpp_ids, and build_count_query if it's gone.
+- If the requirements changed, reinstall from JFrog with pip install -r requirements.txt, then confirm eas-api-common is not an editable or local install.
+- Compile everything with python -m compileall and import the Lambda handler module.
+- Run the full test suite and show the pass and fail counts.
+- Confirm with tests that these still work:
+  - POST /v1/statements with cpp_id and customer_account_number returns only that account.
+  - POST /v1/statements with cpp_id and no customer_account_number gets the unique account numbers from Snowflake, lists the S3 folders, matches the two, and reads only the matched folders.
+  - GET /v1/statements/{statement_id} works as before.
+  - The trace logs and the response format haven't changed.
+  - The customer-accounts endpoints behave as they do in HK-API-376.
+- Give me a table listing each of my changes as kept, adapted or dropped, with the reason, and confirm that all of HK-API-376's changes are present.
+- Show git status and the diff of everything you changed beyond the automatic merge.
+
+STEP 5: COMMIT (only after I approve)
+Commit the merge locally with the message "Merge origin/feature/HK-API-376 into feature/SA-API-412", followed by a short list of the adaptations.
+
+RULES
+- Don't push, rebase, force, run reset --hard, or delete the backup branch.
+- Don't run AWS commands.
+- Don't modify eas-api-common.
